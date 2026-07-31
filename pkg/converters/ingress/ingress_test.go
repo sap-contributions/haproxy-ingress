@@ -1620,6 +1620,45 @@ func TestSyncPartialTCPService(t *testing.T) {
 	c.logger.CompareLogging(`INFO-V(2) syncing 0 host(s) and 1 backend(s)`)
 }
 
+func TestSyncPartialTCPServiceAnnUpdate(t *testing.T) {
+	c := setup(t)
+	defer c.teardown()
+
+	// Full sync: a TCP-service ingress whose backend is reached via
+	// spec.defaultBackend (the PrivateLink coordinator shape). The full
+	// parse tracks Ingress->HATCPService and Ingress->HABackend links.
+	c.createSvc1("default/echo1", "8080", "172.17.0.11")
+	ann := map[string]string{
+		"ingress.kubernetes.io/" + ingtypes.TCPTCPServicePort: "7001",
+		"ingress.kubernetes.io/config-backend":                "acl allow src 10.0.0.0/8",
+	}
+	ing := c.createIng2Ann("default/echo1", "echo1:8080", ann)
+	c.Sync(ing)
+	c.hconfig.Commit()
+	c.logger.Logging = []string{}
+
+	// Simulate a prior partial sync whose destructive QueryLinks cascade
+	// consumed this ingress' tracker links without re-parsing the ingress
+	// (e.g. the links were removed as a cascade from an unrelated dirty
+	// backend). This is the live-cluster precondition for the bug.
+	c.tracker.ClearLinks()
+
+	// Annotation-only partial sync: flip config-backend. trackAddedIngress
+	// must rebuild the links the previous sync consumed. Without the fix, a
+	// defaultBackend-only TCP ingress re-tracks only its HABackend (not the
+	// HATCPService), so QueryLinks yields an empty dirtyTCPServices set, the
+	// stale TCP service is not removed, re-parse hits "already assigned",
+	// and the backend resync is skipped - the new config-backend never
+	// renders (silent staleness, the -10709 failure on CI).
+	ann["ingress.kubernetes.io/config-backend"] = "acl allow src 0.0.0.0/0"
+	ing = c.createIng2Ann("default/echo1", "echo1:8080", ann)
+	c.cache.Changed.IngressesUpd = []*networking.Ingress{ing}
+	c.Sync()
+
+	// The backend must be re-synced so the new config-backend is rendered.
+	c.logger.CompareLogging(`INFO-V(2) syncing 0 host(s) and 1 backend(s)`)
+}
+
 func TestSyncPartialDefaultBackend(t *testing.T) {
 	c := setup(t)
 	defer c.teardown()

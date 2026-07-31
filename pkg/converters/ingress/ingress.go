@@ -309,16 +309,25 @@ func (c *converter) syncPartial() {
 func (c *converter) trackAddedIngress() {
 	for _, ing := range append(c.changed.IngressesAdd, c.changed.IngressesUpd...) {
 		name := ing.Namespace + "/" + ing.Name
+		port, _ := strconv.Atoi(c.readConfigKey(ing.Annotations, ingtypes.TCPTCPServicePort))
+		ctx := convtypes.ResourceHAHostname
+		if port > 0 {
+			ctx = convtypes.ResourceHATCPService
+		}
 		if ing.Spec.DefaultBackend != nil {
 			backend := c.findBackend(ing.Namespace, ing.Spec.DefaultBackend)
 			if backend != nil {
 				c.tracker.TrackNames(convtypes.ResourceIngress, name, convtypes.ResourceHABackend, backend.ID)
 			}
-		}
-		port, _ := strconv.Atoi(c.readConfigKey(ing.Annotations, ingtypes.TCPTCPServicePort))
-		ctx := convtypes.ResourceHAHostname
-		if port > 0 {
-			ctx = convtypes.ResourceHATCPService
+			// A tcp service declared via spec.defaultBackend registers its
+			// service under the default host (see syncIngressTCP). Track that
+			// host here too, otherwise an annotation-only update to a
+			// defaultBackend-only tcp ingress never marks the tcp service
+			// dirty, the stale service is not removed, and the backend resync
+			// is skipped with "already assigned" - leaving stale config-backend.
+			if port > 0 {
+				c.tracker.TrackNames(convtypes.ResourceIngress, name, ctx, normalizeHostname("", port))
+			}
 		}
 		for _, rule := range ing.Spec.Rules {
 			c.tracker.TrackNames(convtypes.ResourceIngress, name, ctx, normalizeHostname(rule.Host, port))
