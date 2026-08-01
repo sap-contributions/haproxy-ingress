@@ -330,12 +330,39 @@ func (c *converter) trackAddedIngress() {
 			}
 		}
 		for _, rule := range ing.Spec.Rules {
-			c.tracker.TrackNames(convtypes.ResourceIngress, name, ctx, normalizeHostname(rule.Host, port))
+			hostname := normalizeHostname(rule.Host, port)
+			c.tracker.TrackNames(convtypes.ResourceIngress, name, ctx, hostname)
 			if rule.HTTP != nil {
 				for _, path := range rule.HTTP.Paths {
 					backend := c.findBackend(ing.Namespace, &path.Backend)
 					if backend != nil {
 						c.tracker.TrackNames(convtypes.ResourceIngress, name, convtypes.ResourceHABackend, backend.ID)
+					}
+				}
+			}
+			// A rules-based tcp service (spec.rules, the shape emitted by the
+			// hanaservice-operator for PrivateLink) carries its backend in the
+			// TCPServiceHost, not via a resolvable HTTP path. findBackend above
+			// re-derives the backend from the Service and may return nil, so an
+			// annotation-only update (e.g. a changed config-backend allowlist)
+			// never marks the backend dirty; the resync then hits the "already
+			// assigned" short-circuit in syncIngressTCP and preserves the stale
+			// CustomConfigLate. Track the backend the tcp service already points
+			// at so the annotation change forces a clean backend re-parse. The
+			// TCPServicePort.Hosts() map is keyed by the bare hostname (the port
+			// is split off in AcquireTCPService), so look up by rule.Host.
+			if port > 0 {
+				bareHostname := rule.Host
+				if bareHostname == "" {
+					bareHostname = hatypes.DefaultHost
+				}
+				if tcpPort := c.haproxy.TCPServices().FindTCPPort(port); tcpPort != nil {
+					tcpHost := tcpPort.Hosts()[bareHostname]
+					if tcpHost == nil && bareHostname == hatypes.DefaultHost {
+						tcpHost = tcpPort.DefaultHost()
+					}
+					if tcpHost != nil && !tcpHost.Backend.IsEmpty() {
+						c.tracker.TrackNames(convtypes.ResourceIngress, name, convtypes.ResourceHABackend, tcpHost.Backend.String())
 					}
 				}
 			}
